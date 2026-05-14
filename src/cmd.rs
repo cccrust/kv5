@@ -755,6 +755,130 @@ pub fn handle_command(store: Arc<Store>, input: RespValue) -> RespValue {
             Err(e) => RespValue::error(&e.to_string()),
         },
 
+        // Pub/Sub
+        "PUBLISH" => {
+            if args.len() < 3 {
+                return wrong_arity("PUBLISH");
+            }
+            let channel = &args[1];
+            let message = &args[2];
+            let count = store.pubsub.publish(channel, message);
+            RespValue::Integer(count as i64)
+        }
+
+        "SUBSCRIBE" => {
+            if args.len() < 2 {
+                return wrong_arity("SUBSCRIBE");
+            }
+            let channels: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+            let count = store.pubsub.channels_count();
+            RespValue::Array(Some(
+                channels
+                    .iter()
+                    .map(|ch| {
+                        RespValue::Array(Some(vec![
+                            RespValue::SimpleString("subscribe".to_string()),
+                            RespValue::BulkString(Some(ch.to_string())),
+                            RespValue::Integer(count as i64),
+                        ]))
+                    })
+                    .collect(),
+            ))
+        }
+
+        "UNSUBSCRIBE" => {
+            let channels: Vec<&str> = if args.len() > 1 {
+                args[1..].iter().map(|s| s.as_str()).collect()
+            } else {
+                vec![]
+            };
+            RespValue::Array(Some(
+                channels
+                    .iter()
+                    .map(|ch| {
+                        RespValue::Array(Some(vec![
+                            RespValue::SimpleString("unsubscribe".to_string()),
+                            RespValue::BulkString(Some(ch.to_string())),
+                            RespValue::Integer(0),
+                        ]))
+                    })
+                    .collect(),
+            ))
+        }
+
+        "PSUBSCRIBE" => {
+            if args.len() < 2 {
+                return wrong_arity("PSUBSCRIBE");
+            }
+            let patterns: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+            let count = store.pubsub.patterns_count();
+            RespValue::Array(Some(
+                patterns
+                    .iter()
+                    .map(|pat| {
+                        RespValue::Array(Some(vec![
+                            RespValue::SimpleString("psubscribe".to_string()),
+                            RespValue::BulkString(Some(pat.to_string())),
+                            RespValue::Integer(count as i64),
+                        ]))
+                    })
+                    .collect(),
+            ))
+        }
+
+        "PUNSUBSCRIBE" => {
+            let patterns: Vec<&str> = if args.len() > 1 {
+                args[1..].iter().map(|s| s.as_str()).collect()
+            } else {
+                vec![]
+            };
+            RespValue::Array(Some(
+                patterns
+                    .iter()
+                    .map(|pat| {
+                        RespValue::Array(Some(vec![
+                            RespValue::SimpleString("punsubscribe".to_string()),
+                            RespValue::BulkString(Some(pat.to_string())),
+                            RespValue::Integer(0),
+                        ]))
+                    })
+                    .collect(),
+            ))
+        }
+
+        "PUBSUB" => {
+            if args.len() < 2 {
+                return wrong_arity("PUBSUB");
+            }
+            match args[1].to_uppercase().as_str() {
+                "CHANNELS" => {
+                    let pattern = args.get(2).map(|s| s.as_str());
+                    let channels = store.pubsub.channels(pattern);
+                    RespValue::Array(Some(
+                        channels
+                            .into_iter()
+                            .map(|c| RespValue::BulkString(Some(c)))
+                            .collect(),
+                    ))
+                }
+                "NUMSUB" => {
+                    let channels: Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
+                    let counts = store.pubsub.numsub(&channels);
+                    let mut result = Vec::new();
+                    for (ch, count) in counts {
+                        result.push(RespValue::BulkString(Some(ch)));
+                        result.push(RespValue::Integer(count as i64));
+                    }
+                    RespValue::Array(Some(result))
+                }
+                "NUMPAT" => {
+                    let count = store.pubsub.numpat();
+                    RespValue::Integer(count as i64)
+                }
+                _ => RespValue::error("ERR Unknown PUBSUB subcommand"),
+            }
+        }
+
         _ => RespValue::Error(format!("ERR unknown command '{}'", cmd)),
     }
 }

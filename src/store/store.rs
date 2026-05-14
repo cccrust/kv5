@@ -8,11 +8,13 @@ use tokio::sync::RwLock;
 use super::helpers::{glob_match, matches_pattern};
 use super::sortedset::SortedSet;
 use super::types::{Entry, Snapshot, Value};
+use crate::pubsub::PubSub;
 
 pub struct Store {
     data: Arc<DashMap<String, Entry>>,
     persist_path: Option<String>,
     _lock: Arc<RwLock<()>>,
+    pub pubsub: PubSub,
 }
 
 impl Store {
@@ -21,6 +23,7 @@ impl Store {
             data: Arc::new(DashMap::new()),
             persist_path: persist_path.clone(),
             _lock: Arc::new(RwLock::new(())),
+            pubsub: PubSub::new(),
         };
 
         if let Some(ref path) = persist_path {
