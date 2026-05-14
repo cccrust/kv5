@@ -1,3 +1,4 @@
+use crate::client::SharedClientState;
 use crate::resp::RespValue;
 use crate::store::Store;
 use std::sync::Arc;
@@ -35,6 +36,25 @@ pub fn handle_command(store: Arc<Store>, input: RespValue) -> RespValue {
             RespValue::BulkString(Some(msg))
         }
         "QUIT" => RespValue::SimpleString("OK".to_string()),
+
+        // Transaction
+        "MULTI" => RespValue::ok(),
+        "EXEC" => RespValue::Array(Some(vec![])),
+        "DISCARD" => RespValue::ok(),
+        "WATCH" => RespValue::ok(),
+        "UNWATCH" => RespValue::ok(),
+
+        // Server
+        "CLIENT" => {
+            if args.len() < 2 {
+                return RespValue::error("wrong number of arguments for 'client' command");
+            }
+            match args[1].to_uppercase().as_str() {
+                "LIST" => RespValue::Array(Some(vec![])),
+                "KILL" => RespValue::Integer(0),
+                _ => RespValue::error("unknown subcommand for 'client'"),
+            }
+        }
 
         // String
         "SET" => {
@@ -892,5 +912,290 @@ fn parse_score(s: &str) -> Result<f64, ()> {
         "-INF" => Ok(f64::NEG_INFINITY),
         "+INF" | "INF" => Ok(f64::INFINITY),
         _ => s.parse().map_err(|_| ()),
+    }
+}
+
+pub fn handle_command_with_client(
+    store: Arc<Store>,
+    client: SharedClientState,
+    input: RespValue,
+) -> RespValue {
+    let args = match extract_args(input.clone()) {
+        Some(a) if !a.is_empty() => a,
+        _ => return RespValue::error("invalid command format"),
+    };
+
+    let cmd = args[0].to_uppercase();
+
+    match cmd.as_str() {
+        "MULTI" => {
+            let mut client = client.blocking_lock();
+            client.multi();
+            RespValue::ok()
+        }
+        "EXEC" => {
+            let mut client = client.blocking_lock();
+            let commands = client.exec();
+            if commands.is_empty() {
+                return RespValue::Array(Some(vec![]));
+            }
+            let mut results = Vec::new();
+            for cmd_str in commands {
+                if let Some(args) = parse_command_string(&cmd_str) {
+                    let result = execute_store_command(store.clone(), RespValue::Array(Some(args)));
+                    results.push(result);
+                }
+            }
+            RespValue::Array(Some(results))
+        }
+        "DISCARD" => {
+            let mut client = client.blocking_lock();
+            client.discard();
+            RespValue::ok()
+        }
+        "WATCH" => {
+            let keys: Vec<String> = args[1..].to_vec();
+            let mut client = client.blocking_lock();
+            client.watch(keys);
+            RespValue::ok()
+        }
+        "UNWATCH" => {
+            let mut client = client.blocking_lock();
+            client.unwatch();
+            RespValue::ok()
+        }
+        _ => handle_command(store, input),
+    }
+}
+
+fn parse_command_string(s: &str) -> Option<Vec<crate::resp::RespValue>> {
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    if parts.is_empty() {
+        return None;
+    }
+    Some(
+        parts
+            .into_iter()
+            .map(|p| crate::resp::RespValue::BulkString(Some(p.to_string())))
+            .collect(),
+    )
+}
+
+fn execute_store_command(store: Arc<Store>, input: crate::resp::RespValue) -> RespValue {
+    let args = match extract_args(input) {
+        Some(a) if !a.is_empty() => a,
+        _ => return RespValue::error("invalid command format"),
+    };
+
+    let cmd = args[0].to_uppercase();
+
+    match cmd.as_str() {
+        "SET" => {
+            if args.len() < 3 {
+                return wrong_arity("SET");
+            }
+            store.set(args[1].clone(), args[2].clone());
+            RespValue::ok()
+        }
+        "GET" => {
+            if args.len() < 2 {
+                return wrong_arity("GET");
+            }
+            match store.get(&args[1]) {
+                Some(v) if v.starts_with("(error)") => RespValue::wrongtype(),
+                Some(v) => RespValue::BulkString(Some(v)),
+                None => RespValue::BulkString(None),
+            }
+        }
+        "DEL" => {
+            let keys: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+            RespValue::Integer(store.del(keys))
+        }
+        "INCR" => {
+            if args.len() < 2 {
+                return wrong_arity("INCR");
+            }
+            match store.incr(&args[1]) {
+                Ok(v) => RespValue::Integer(v),
+                Err(_) => RespValue::error("value is not an integer"),
+            }
+        }
+        _ => RespValue::Error(format!("ERR unknown command '{}'", cmd)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::new_client_state;
+    use crate::store::Store;
+
+    fn new_store() -> Arc<Store> {
+        Arc::new(Store::new(None))
+    }
+
+    fn make_array_cmd(args: &[&str]) -> RespValue {
+        RespValue::Array(Some(
+            args.iter()
+                .map(|s| RespValue::BulkString(Some(s.to_string())))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn test_multi_returns_ok() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+        let cmd = make_array_cmd(&["MULTI"]);
+        let result = handle_command_with_client(store, client, cmd);
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn test_exec_empty_queue_returns_empty_array() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+        {
+            let mut c = client.blocking_lock();
+            c.multi();
+        }
+        let cmd = make_array_cmd(&["EXEC"]);
+        let result = handle_command_with_client(store, client, cmd);
+        assert_eq!(result, RespValue::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn test_discard_returns_ok() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+        let cmd = make_array_cmd(&["DISCARD"]);
+        let result = handle_command_with_client(store, client, cmd);
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn test_watch_returns_ok() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+        let cmd = make_array_cmd(&["WATCH", "key1", "key2"]);
+        let result = handle_command_with_client(store, client, cmd);
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn test_unwatch_returns_ok() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+        let cmd = make_array_cmd(&["UNWATCH"]);
+        let result = handle_command_with_client(store, client, cmd);
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn test_transaction_queue_and_exec() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+
+        {
+            let mut c = client.blocking_lock();
+            c.multi();
+            c.queue_command("SET foo bar".to_string());
+        }
+
+        let cmd = make_array_cmd(&["EXEC"]);
+        let result = handle_command_with_client(store.clone(), client, cmd);
+
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0], RespValue::SimpleString("OK".to_string()));
+            }
+            _ => panic!("Expected Array result"),
+        }
+
+        assert_eq!(store.get("foo"), Some("bar".to_string()));
+    }
+
+    #[test]
+    fn test_ping_returns_pong() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["PING"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::SimpleString("PONG".to_string()));
+    }
+
+    #[test]
+    fn test_ping_with_message() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["PING", "hello"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::SimpleString("hello".to_string()));
+    }
+
+    #[test]
+    fn test_echo() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["ECHO", "test message"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(
+            result,
+            RespValue::BulkString(Some("test message".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_info() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["INFO"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::BulkString(Some(s)) => {
+                assert!(s.contains("kv5_version"));
+            }
+            _ => panic!("Expected BulkString result"),
+        }
+    }
+
+    #[test]
+    fn test_client_list() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["CLIENT", "LIST"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert!(arr.is_empty());
+            }
+            _ => panic!("Expected Array result"),
+        }
+    }
+
+    #[test]
+    fn test_client_kill() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["CLIENT", "KILL", "127.0.0.1:1234"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[test]
+    fn test_client_unknown_subcommand() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["CLIENT", "UNKNOWN"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Error(_) => {}
+            _ => panic!("Expected Error result"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_command() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["UNKNOWN_CMD"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Error(_) => {}
+            _ => panic!("Expected Error result"),
+        }
     }
 }

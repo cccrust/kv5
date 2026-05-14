@@ -1,3 +1,4 @@
+pub mod client;
 pub mod cmd;
 pub mod connection;
 pub mod db;
