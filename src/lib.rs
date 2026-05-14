@@ -1,4 +1,8 @@
 pub mod cmd;
+pub mod connection;
+pub mod db;
 pub mod pubsub;
 pub mod resp;
+pub mod server;
+pub mod shutdown;
 pub mod store;

@@ -1,12 +1,10 @@
-use kv5::cmd;
-use kv5::resp::RespParser;
+use kv5::db::DbDropGuard;
+use kv5::server::Listener;
 use kv5::store::Store;
 
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::signal;
+use tokio::sync::broadcast;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:6380";
 const DEFAULT_PERSIST: &str = "kv5.dump.json";
@@ -25,9 +23,8 @@ async fn main() -> Result<()> {
     let store = Arc::new(Store::new(persist));
     Store::start_expiry_task(store.clone());
 
-    let listener = TcpListener::bind(&addr).await?;
-    tracing::info!("kv5 server listening on {}", addr);
-    tracing::info!("Compatible with redis-cli: redis-cli -p 6380");
+    let (notify_shutdown, shutdown_complete_rx) = broadcast::channel(1);
+    let db = Arc::new(DbDropGuard::new(store.clone(), notify_shutdown.clone()));
 
     {
         let store_snap = store.clone();
@@ -43,50 +40,8 @@ async fn main() -> Result<()> {
         });
     }
 
-    let store_shutdown = store.clone();
-    tokio::spawn(async move {
-        signal::ctrl_c().await.expect("failed to listen for Ctrl+C");
-        tracing::info!("Shutting down, saving data...");
-        let _ = store_shutdown.save_to_disk();
-        std::process::exit(0);
-    });
+    let mut server = Listener::new(&addr, db, notify_shutdown, shutdown_complete_rx).await?;
+    server.run().await?;
 
-    loop {
-        let (socket, peer) = listener.accept().await?;
-        tracing::debug!("New connection from {}", peer);
-        let store = store.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, store).await {
-                tracing::debug!("Connection {} closed: {}", peer, e);
-            }
-        });
-    }
-}
-
-async fn handle_connection(mut socket: TcpStream, store: Arc<Store>) -> Result<()> {
-    let mut buf = vec![0u8; 4096];
-    let mut pending = Vec::<u8>::new();
-
-    loop {
-        let n = socket.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
-        }
-
-        pending.extend_from_slice(&buf[..n]);
-
-        loop {
-            let mut parser = RespParser::new(pending.clone());
-            match parser.parse() {
-                Ok(Some(value)) => {
-                    let consumed = parser.consumed();
-                    pending.drain(..consumed);
-                    let response = cmd::handle_command(store.clone(), value);
-                    socket.write_all(&response.serialize()).await?;
-                }
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-    }
+    Ok(())
 }
