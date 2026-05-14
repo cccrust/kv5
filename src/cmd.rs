@@ -775,6 +775,31 @@ pub fn handle_command(store: Arc<Store>, input: RespValue) -> RespValue {
             Err(e) => RespValue::error(&e.to_string()),
         },
 
+        "LASTSAVE" => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            RespValue::Integer(now)
+        }
+
+        "TIME" => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let seconds = now.as_secs() as i64;
+            let microseconds = now.subsec_micros() as i64;
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(seconds.to_string())),
+                RespValue::BulkString(Some(microseconds.to_string())),
+            ]))
+        }
+
+        "SHUTDOWN" => {
+            let _ = store.save_to_disk();
+            RespValue::error("SHUTDOWN")
+        }
+
         // Pub/Sub
         "PUBLISH" => {
             if args.len() < 3 {
@@ -935,6 +960,29 @@ pub fn handle_command_with_client(
         }
         "EXEC" => {
             let mut client = client.blocking_lock();
+
+            if client.has_watched_keys() {
+                let watched_versions = client.watched_keys_versions();
+                let keys: Vec<&str> = watched_versions.iter().map(|(k, _)| k.as_str()).collect();
+                let current_versions = store.get_keys_versions(&keys);
+
+                let mut changed = false;
+                for (key, initial_ver) in watched_versions {
+                    if let Some((_, current_ver)) = current_versions.iter().find(|(k, _)| k == key)
+                    {
+                        if *current_ver != *initial_ver {
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if changed {
+                    client.exec();
+                    return RespValue::Array(None);
+                }
+            }
+
             let commands = client.exec();
             if commands.is_empty() {
                 return RespValue::Array(Some(vec![]));
@@ -955,8 +1003,10 @@ pub fn handle_command_with_client(
         }
         "WATCH" => {
             let keys: Vec<String> = args[1..].to_vec();
+            let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+            let versions = store.get_keys_versions(&key_refs);
             let mut client = client.blocking_lock();
-            client.watch(keys);
+            client.watch(keys, versions);
             RespValue::ok()
         }
         "UNWATCH" => {
@@ -1197,5 +1247,146 @@ mod tests {
             RespValue::Error(_) => {}
             _ => panic!("Expected Error result"),
         }
+    }
+
+    #[test]
+    fn test_time() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["TIME"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                match &arr[0] {
+                    RespValue::BulkString(Some(s)) => {
+                        assert!(s.parse::<i64>().is_ok());
+                    }
+                    _ => panic!("Expected BulkString for seconds"),
+                }
+            }
+            _ => panic!("Expected Array result"),
+        }
+    }
+
+    #[test]
+    fn test_lastsave() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["LASTSAVE"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Integer(n) => {
+                assert!(n > 0);
+            }
+            _ => panic!("Expected Integer result"),
+        }
+    }
+
+    #[test]
+    fn test_shutdown() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["SHUTDOWN"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Error(_) => {}
+            _ => panic!("Expected Error result for SHUTDOWN"),
+        }
+    }
+
+    #[test]
+    fn test_dbsize() {
+        let store = new_store();
+        store.set("key1".to_string(), "value1".to_string());
+        store.set("key2".to_string(), "value2".to_string());
+        let cmd = make_array_cmd(&["DBSIZE"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::Integer(2));
+    }
+
+    #[test]
+    fn test_flushdb() {
+        let store = new_store();
+        store.set("key1".to_string(), "value1".to_string());
+        store.set("key2".to_string(), "value2".to_string());
+        assert_eq!(store.dbsize(), 2);
+        let cmd = make_array_cmd(&["FLUSHDB"]);
+        let result = handle_command(store.clone(), cmd);
+        assert_eq!(result, RespValue::SimpleString("OK".to_string()));
+        assert_eq!(store.dbsize(), 0);
+    }
+
+    #[test]
+    fn test_watch_key_change_detection() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+
+        store.set("foo".to_string(), "initial".to_string());
+
+        {
+            let mut c = client.blocking_lock();
+            c.watch(
+                vec!["foo".to_string()],
+                vec![("foo".to_string(), store.get_key_version("foo"))],
+            );
+            c.multi();
+            c.queue_command("SET foo modified".to_string());
+        }
+
+        store.set("foo".to_string(), "changed_by_another".to_string());
+
+        let cmd = make_array_cmd(&["EXEC"]);
+        let result = handle_command_with_client(store.clone(), client, cmd);
+
+        assert_eq!(result, RespValue::Array(None));
+
+        assert_eq!(store.get("foo"), Some("changed_by_another".to_string()));
+    }
+
+    #[test]
+    fn test_watch_no_change_executes() {
+        let store = new_store();
+        let client = new_client_state("test".to_string(), "127.0.0.1:1234".to_string());
+
+        store.set("foo".to_string(), "initial".to_string());
+
+        {
+            let mut c = client.blocking_lock();
+            c.watch(
+                vec!["foo".to_string()],
+                vec![("foo".to_string(), store.get_key_version("foo"))],
+            );
+            c.multi();
+            c.queue_command("SET foo modified".to_string());
+        }
+
+        let cmd = make_array_cmd(&["EXEC"]);
+        let result = handle_command_with_client(store.clone(), client, cmd);
+
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 1);
+            }
+            _ => panic!("Expected Array result"),
+        }
+
+        assert_eq!(store.get("foo"), Some("modified".to_string()));
+    }
+
+    #[test]
+    fn test_key_version_increments_on_set() {
+        let store = new_store();
+        let v1 = store.get_key_version("key");
+        store.set("key".to_string(), "value".to_string());
+        let v2 = store.get_key_version("key");
+        assert!(v2 > v1);
+    }
+
+    #[test]
+    fn test_key_version_increments_on_del() {
+        let store = new_store();
+        store.set("key".to_string(), "value".to_string());
+        let v1 = store.get_key_version("key");
+        store.del(vec!["key"]);
+        let v2 = store.get_key_version("key");
+        assert!(v2 > v1);
     }
 }

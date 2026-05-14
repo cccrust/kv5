@@ -15,6 +15,7 @@ pub struct Store {
     persist_path: Option<String>,
     _lock: Arc<RwLock<()>>,
     pub pubsub: PubSub,
+    key_version: Arc<DashMap<String, u64>>,
 }
 
 impl Store {
@@ -24,6 +25,7 @@ impl Store {
             persist_path: persist_path.clone(),
             _lock: Arc::new(RwLock::new(())),
             pubsub: PubSub::new(),
+            key_version: Arc::new(DashMap::new()),
         };
 
         if let Some(ref path) = persist_path {
@@ -31,6 +33,21 @@ impl Store {
         }
 
         store
+    }
+
+    pub fn get_key_version(&self, key: &str) -> u64 {
+        self.key_version.get(key).map(|v| *v.value()).unwrap_or(0)
+    }
+
+    fn increment_key_version(&self, key: &str) {
+        let mut version = self.key_version.entry(key.to_string()).or_insert(0);
+        *version += 1;
+    }
+
+    pub fn get_keys_versions(&self, keys: &[&str]) -> Vec<(String, u64)> {
+        keys.iter()
+            .map(|k| (k.to_string(), self.get_key_version(k)))
+            .collect()
     }
 
     fn load_from_disk(&self, path: &str) {
@@ -104,23 +121,27 @@ impl Store {
     }
 
     pub fn set(&self, key: String, value: String) -> &'static str {
-        self.data.insert(key, Entry::new(Value::String(value)));
+        self.data
+            .insert(key.clone(), Entry::new(Value::String(value)));
+        self.increment_key_version(&key);
         "OK"
     }
 
     pub fn setex(&self, key: String, value: String, ttl_secs: u64) -> &'static str {
         self.data.insert(
-            key,
+            key.clone(),
             Entry::with_expiry(Value::String(value), Duration::from_secs(ttl_secs)),
         );
+        self.increment_key_version(&key);
         "OK"
     }
 
     pub fn psetex(&self, key: String, value: String, ttl_ms: u64) -> &'static str {
         self.data.insert(
-            key,
+            key.clone(),
             Entry::with_expiry(Value::String(value), Duration::from_millis(ttl_ms)),
         );
+        self.increment_key_version(&key);
         "OK"
     }
 
@@ -128,7 +149,9 @@ impl Store {
         if self.exists(&key) {
             0
         } else {
-            self.data.insert(key, Entry::new(Value::String(value)));
+            self.data
+                .insert(key.clone(), Entry::new(Value::String(value)));
+            self.increment_key_version(&key);
             1
         }
     }
@@ -229,7 +252,14 @@ impl Store {
 
     pub fn del(&self, keys: Vec<&str>) -> i64 {
         keys.iter()
-            .filter(|k| self.data.remove(**k).is_some())
+            .filter(|k| {
+                if self.data.remove(**k).is_some() {
+                    self.increment_key_version(k);
+                    true
+                } else {
+                    false
+                }
+            })
             .count() as i64
     }
 
