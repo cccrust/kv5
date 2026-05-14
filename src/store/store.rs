@@ -805,6 +805,183 @@ impl Store {
         count
     }
 
+    pub fn scan(&self, cursor: usize, pattern: Option<&str>, count: usize) -> (usize, Vec<String>) {
+        let all_keys: Vec<String> = self
+            .data
+            .iter()
+            .filter(|e| !e.value().is_expired())
+            .map(|e| e.key().clone())
+            .collect();
+
+        if all_keys.is_empty() {
+            return (0, vec![]);
+        }
+
+        let total = all_keys.len();
+        let start = cursor % total;
+        let mut result = Vec::new();
+        let mut visited = 0;
+
+        let mut idx = start;
+        while visited < count {
+            let key = &all_keys[idx];
+            match pattern {
+                Some(p) if !matches_pattern(key, p) => {}
+                _ => result.push(key.clone()),
+            }
+            visited += 1;
+            idx = (idx + 1) % total;
+            if idx == start {
+                break;
+            }
+        }
+
+        let next_cursor = if idx == start {
+            0
+        } else {
+            (cursor + count) % total
+        };
+        (next_cursor, result)
+    }
+
+    pub fn sscan(
+        &self,
+        key: &str,
+        cursor: usize,
+        pattern: Option<&str>,
+        count: usize,
+    ) -> (usize, Vec<String>) {
+        let members: Vec<String> = match self.data.get(key) {
+            Some(e) if !e.is_expired() => match &e.value {
+                Value::Set(set) => set.iter().cloned().collect(),
+                _ => return (0, vec![]),
+            },
+            _ => return (0, vec![]),
+        };
+
+        if members.is_empty() {
+            return (0, vec![]);
+        }
+
+        let total = members.len();
+        let start = cursor % total;
+        let mut result = Vec::new();
+        let mut visited = 0;
+
+        let mut idx = start;
+        while visited < count {
+            let member = &members[idx];
+            match pattern {
+                Some(p) if !matches_pattern(member, p) => {}
+                _ => result.push(member.clone()),
+            }
+            visited += 1;
+            idx = (idx + 1) % total;
+            if idx == start {
+                break;
+            }
+        }
+
+        let next_cursor = if idx == start {
+            0
+        } else {
+            (cursor + count) % total
+        };
+        (next_cursor, result)
+    }
+
+    pub fn hscan(
+        &self,
+        key: &str,
+        cursor: usize,
+        pattern: Option<&str>,
+        count: usize,
+    ) -> (usize, Vec<String>) {
+        let fields: Vec<String> = match self.data.get(key) {
+            Some(e) if !e.is_expired() => match &e.value {
+                Value::Hash(map) => map.keys().cloned().collect(),
+                _ => return (0, vec![]),
+            },
+            _ => return (0, vec![]),
+        };
+
+        if fields.is_empty() {
+            return (0, vec![]);
+        }
+
+        let total = fields.len();
+        let start = cursor % total;
+        let mut result = Vec::new();
+        let mut visited = 0;
+
+        let mut idx = start;
+        while visited < count {
+            let field = &fields[idx];
+            match pattern {
+                Some(p) if !matches_pattern(field, p) => {}
+                _ => result.push(field.clone()),
+            }
+            visited += 1;
+            idx = (idx + 1) % total;
+            if idx == start {
+                break;
+            }
+        }
+
+        let next_cursor = if idx == start {
+            0
+        } else {
+            (cursor + count) % total
+        };
+        (next_cursor, result)
+    }
+
+    pub fn zscan(
+        &self,
+        key: &str,
+        cursor: usize,
+        pattern: Option<&str>,
+        count: usize,
+    ) -> (usize, Vec<String>) {
+        let members: Vec<String> = match self.data.get(key) {
+            Some(e) if !e.is_expired() => match &e.value {
+                Value::SortedSet(zset) => zset.members(),
+                _ => return (0, vec![]),
+            },
+            _ => return (0, vec![]),
+        };
+
+        if members.is_empty() {
+            return (0, vec![]);
+        }
+
+        let total = members.len();
+        let start = cursor % total;
+        let mut result = Vec::new();
+        let mut visited = 0;
+
+        let mut idx = start;
+        while visited < count {
+            let member = &members[idx];
+            match pattern {
+                Some(p) if !matches_pattern(member, p) => {}
+                _ => result.push(member.clone()),
+            }
+            visited += 1;
+            idx = (idx + 1) % total;
+            if idx == start {
+                break;
+            }
+        }
+
+        let next_cursor = if idx == start {
+            0
+        } else {
+            (cursor + count) % total
+        };
+        (next_cursor, result)
+    }
+
     pub fn bitop(&self, op: &str, destkey: &str, keys: &[&str]) -> i64 {
         if keys.is_empty() {
             self.set(destkey.to_string(), String::new());

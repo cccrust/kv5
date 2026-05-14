@@ -199,4 +199,8 @@ impl SortedSet {
         self.zadd(new_score, member);
         new_score
     }
+
+    pub fn members(&self) -> Vec<String> {
+        self.entries.iter().map(|(_, m)| m.clone()).collect()
+    }
 }

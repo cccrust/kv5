@@ -999,6 +999,138 @@ pub fn handle_command(store: Arc<Store>, input: RespValue) -> RespValue {
             }
         }
 
+        // Keyspace - Scan
+        "SCAN" => {
+            let cursor: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut pattern = None;
+            let mut count = 10;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].to_uppercase().as_str() {
+                    "MATCH" if i + 1 < args.len() => {
+                        pattern = Some(args[i + 1].as_str());
+                        i += 2;
+                    }
+                    "COUNT" if i + 1 < args.len() => {
+                        count = args[i + 1].parse().unwrap_or(10);
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let (next_cursor, keys) = store.scan(cursor, pattern, count);
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(next_cursor.to_string())),
+                RespValue::Array(Some(
+                    keys.into_iter()
+                        .map(|k| RespValue::BulkString(Some(k)))
+                        .collect(),
+                )),
+            ]))
+        }
+
+        "SSCAN" => {
+            if args.len() < 3 {
+                return wrong_arity("SSCAN");
+            }
+            let key = &args[1];
+            let cursor: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut pattern = None;
+            let mut count = 10;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].to_uppercase().as_str() {
+                    "MATCH" if i + 1 < args.len() => {
+                        pattern = Some(args[i + 1].as_str());
+                        i += 2;
+                    }
+                    "COUNT" if i + 1 < args.len() => {
+                        count = args[i + 1].parse().unwrap_or(10);
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let (next_cursor, members) = store.sscan(key, cursor, pattern, count);
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(next_cursor.to_string())),
+                RespValue::Array(Some(
+                    members
+                        .into_iter()
+                        .map(|m| RespValue::BulkString(Some(m)))
+                        .collect(),
+                )),
+            ]))
+        }
+
+        "HSCAN" => {
+            if args.len() < 3 {
+                return wrong_arity("HSCAN");
+            }
+            let key = &args[1];
+            let cursor: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut pattern = None;
+            let mut count = 10;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].to_uppercase().as_str() {
+                    "MATCH" if i + 1 < args.len() => {
+                        pattern = Some(args[i + 1].as_str());
+                        i += 2;
+                    }
+                    "COUNT" if i + 1 < args.len() => {
+                        count = args[i + 1].parse().unwrap_or(10);
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let (next_cursor, fields) = store.hscan(key, cursor, pattern, count);
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(next_cursor.to_string())),
+                RespValue::Array(Some(
+                    fields
+                        .into_iter()
+                        .map(|f| RespValue::BulkString(Some(f)))
+                        .collect(),
+                )),
+            ]))
+        }
+
+        "ZSCAN" => {
+            if args.len() < 3 {
+                return wrong_arity("ZSCAN");
+            }
+            let key = &args[1];
+            let cursor: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut pattern = None;
+            let mut count = 10;
+            let mut i = 3;
+            while i < args.len() {
+                match args[i].to_uppercase().as_str() {
+                    "MATCH" if i + 1 < args.len() => {
+                        pattern = Some(args[i + 1].as_str());
+                        i += 2;
+                    }
+                    "COUNT" if i + 1 < args.len() => {
+                        count = args[i + 1].parse().unwrap_or(10);
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let (next_cursor, members) = store.zscan(key, cursor, pattern, count);
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(next_cursor.to_string())),
+                RespValue::Array(Some(
+                    members
+                        .into_iter()
+                        .map(|m| RespValue::BulkString(Some(m)))
+                        .collect(),
+                )),
+            ]))
+        }
+
         _ => RespValue::Error(format!("ERR unknown command '{}'", cmd)),
     }
 }
@@ -1533,5 +1665,168 @@ mod tests {
         let cmd = make_array_cmd(&["BITOP", "AND", "dest", "key1", "key2"]);
         let result = handle_command(store, cmd);
         assert_eq!(result, RespValue::Integer(1));
+    }
+
+    #[test]
+    fn test_scan_basic() {
+        let store = new_store();
+        store.set("key1".to_string(), "value1".to_string());
+        store.set("key2".to_string(), "value2".to_string());
+        store.set("key3".to_string(), "value3".to_string());
+
+        let cmd = make_array_cmd(&["SCAN", "0"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                match &arr[0] {
+                    RespValue::BulkString(Some(s)) => {
+                        assert!(s.parse::<usize>().is_ok());
+                    }
+                    _ => panic!("Expected BulkString for cursor"),
+                };
+                match &arr[1] {
+                    RespValue::Array(Some(keys)) => {
+                        assert!(!keys.is_empty());
+                    }
+                    _ => panic!("Expected Array for keys"),
+                };
+            }
+            _ => panic!("Expected Array result for SCAN"),
+        }
+    }
+
+    #[test]
+    fn test_scan_with_match() {
+        let store = new_store();
+        store.set("user:1".to_string(), "value1".to_string());
+        store.set("user:2".to_string(), "value2".to_string());
+        store.set("post:1".to_string(), "value3".to_string());
+
+        let cmd = make_array_cmd(&["SCAN", "0", "MATCH", "user:*"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                match &arr[1] {
+                    RespValue::Array(Some(keys)) => {
+                        for key in keys {
+                            if let RespValue::BulkString(Some(k)) = key {
+                                assert!(k.starts_with("user:"));
+                            }
+                        }
+                    }
+                    _ => panic!("Expected Array for keys"),
+                };
+            }
+            _ => panic!("Expected Array result for SCAN"),
+        }
+    }
+
+    #[test]
+    fn test_scan_empty_db() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["SCAN", "0"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                match &arr[1] {
+                    RespValue::Array(Some(keys)) => {
+                        assert!(keys.is_empty());
+                    }
+                    _ => panic!("Expected empty Array for keys"),
+                };
+            }
+            _ => panic!("Expected Array result for SCAN"),
+        }
+    }
+
+    #[test]
+    fn test_sscan() {
+        let store = new_store();
+        store.sadd("myset", vec!["one", "two", "three"]).ok();
+
+        let cmd = make_array_cmd(&["SSCAN", "myset", "0"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                match &arr[1] {
+                    RespValue::Array(Some(members)) => {
+                        assert_eq!(members.len(), 3);
+                    }
+                    _ => panic!("Expected Array for members"),
+                };
+            }
+            _ => panic!("Expected Array result for SSCAN"),
+        }
+    }
+
+    #[test]
+    fn test_hscan() {
+        let store = new_store();
+        store.hset("myhash", "field1", "value1").ok();
+        store.hset("myhash", "field2", "value2").ok();
+
+        let cmd = make_array_cmd(&["HSCAN", "myhash", "0"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                match &arr[1] {
+                    RespValue::Array(Some(fields)) => {
+                        assert_eq!(fields.len(), 2);
+                    }
+                    _ => panic!("Expected Array for fields"),
+                };
+            }
+            _ => panic!("Expected Array result for HSCAN"),
+        }
+    }
+
+    #[test]
+    fn test_zscan() {
+        let store = new_store();
+        store.zadd("myzset", 1.0, "one");
+        store.zadd("myzset", 2.0, "two");
+
+        let cmd = make_array_cmd(&["ZSCAN", "myzset", "0"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                match &arr[1] {
+                    RespValue::Array(Some(members)) => {
+                        assert_eq!(members.len(), 2);
+                    }
+                    _ => panic!("Expected Array for members"),
+                };
+            }
+            _ => panic!("Expected Array result for ZSCAN"),
+        }
+    }
+
+    #[test]
+    fn test_sscan_with_match() {
+        let store = new_store();
+        store.sadd("myset", vec!["user:1", "user:2", "post:1"]).ok();
+
+        let cmd = make_array_cmd(&["SSCAN", "myset", "0", "MATCH", "user:*"]);
+        let result = handle_command(store, cmd);
+        match result {
+            RespValue::Array(Some(arr)) => {
+                match &arr[1] {
+                    RespValue::Array(Some(members)) => {
+                        for member in members {
+                            if let RespValue::BulkString(Some(m)) = member {
+                                assert!(m.starts_with("user:"));
+                            }
+                        }
+                    }
+                    _ => panic!("Expected Array for members"),
+                };
+            }
+            _ => panic!("Expected Array result for SSCAN"),
+        }
     }
 }
