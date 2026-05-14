@@ -199,6 +199,81 @@ pub fn handle_command(store: Arc<Store>, input: RespValue) -> RespValue {
             RespValue::Integer(store.strlen(&args[1]))
         }
 
+        // Bit
+        "GETBIT" => {
+            if args.len() < 3 {
+                return wrong_arity("GETBIT");
+            }
+            let offset: usize = match args[2].parse() {
+                Ok(o) => o,
+                Err(_) => return RespValue::error("offset is not an integer"),
+            };
+            RespValue::Integer(store.getbit(&args[1], offset))
+        }
+
+        "SETBIT" => {
+            if args.len() < 4 {
+                return wrong_arity("SETBIT");
+            }
+            let offset: usize = match args[2].parse() {
+                Ok(o) => o,
+                Err(_) => return RespValue::error("offset is not an integer"),
+            };
+            let value: u8 = match args[3].parse() {
+                Ok(v) => v,
+                Err(_) => return RespValue::error("value is not an integer"),
+            };
+            RespValue::Integer(store.setbit(&args[1], offset, value))
+        }
+
+        "BITCOUNT" => {
+            if args.len() < 2 {
+                return wrong_arity("BITCOUNT");
+            }
+            let start = if args.len() > 2 {
+                args[2].parse().ok()
+            } else {
+                None
+            };
+            let end = if args.len() > 3 {
+                args[3].parse().ok()
+            } else {
+                None
+            };
+            RespValue::Integer(store.bitcount(&args[1], start, end))
+        }
+
+        "BITOP" => {
+            if args.len() < 4 {
+                return wrong_arity("BITOP");
+            }
+            let op = &args[1];
+            let destkey = &args[2];
+            let keys: Vec<&str> = args[3..].iter().map(|s| s.as_str()).collect();
+            RespValue::Integer(store.bitop(op, destkey, &keys))
+        }
+
+        "BITPOS" => {
+            if args.len() < 3 {
+                return wrong_arity("BITPOS");
+            }
+            let bit: u8 = match args[2].parse() {
+                Ok(b) => b,
+                Err(_) => return RespValue::error("bit is not an integer"),
+            };
+            let start = if args.len() > 3 {
+                args[3].parse().ok()
+            } else {
+                None
+            };
+            let end = if args.len() > 4 {
+                args[4].parse().ok()
+            } else {
+                None
+            };
+            RespValue::Integer(store.bitpos(&args[1], bit, start, end))
+        }
+
         // Integer
         "INCR" => {
             if args.len() < 2 {
@@ -1388,5 +1463,75 @@ mod tests {
         store.del(vec!["key"]);
         let v2 = store.get_key_version("key");
         assert!(v2 > v1);
+    }
+
+    #[test]
+    fn test_getbit() {
+        let store = new_store();
+        store.set("key".to_string(), "a".to_string());
+        assert_eq!(store.getbit("key", 0), 0);
+        assert_eq!(store.getbit("key", 1), 1);
+        assert_eq!(store.getbit("key", 7), 1);
+        assert_eq!(store.getbit("nonexistent", 0), 0);
+    }
+
+    #[test]
+    fn test_bitcount() {
+        let store = new_store();
+        store.set("key".to_string(), "foobar".to_string());
+        assert_eq!(store.bitcount("key", None, None), 26);
+        assert_eq!(store.bitcount("key", Some(0), Some(0)), 4);
+    }
+
+    #[test]
+    fn test_bitop() {
+        let store = new_store();
+        store.set("key1".to_string(), "foo".to_string());
+        store.set("key2".to_string(), "bar".to_string());
+        let result = store.bitop("OR", "dest", &["key1", "key2"]);
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn test_bitpos() {
+        let store = new_store();
+        store.set("key".to_string(), "r".to_string());
+        assert_eq!(store.bitpos("key", 1, None, None), 1);
+    }
+
+    #[test]
+    fn test_getbit_command() {
+        let store = new_store();
+        store.set("mykey".to_string(), "\x00".to_string());
+        let cmd = make_array_cmd(&["GETBIT", "mykey", "0"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[test]
+    fn test_setbit_command() {
+        let store = new_store();
+        let cmd = make_array_cmd(&["SETBIT", "mykey", "7", "1"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::Integer(0));
+    }
+
+    #[test]
+    fn test_bitcount_command() {
+        let store = new_store();
+        store.set("mykey".to_string(), "test".to_string());
+        let cmd = make_array_cmd(&["BITCOUNT", "mykey"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::Integer(17));
+    }
+
+    #[test]
+    fn test_bitop_command() {
+        let store = new_store();
+        store.set("key1".to_string(), "a".to_string());
+        store.set("key2".to_string(), "b".to_string());
+        let cmd = make_array_cmd(&["BITOP", "AND", "dest", "key1", "key2"]);
+        let result = handle_command(store, cmd);
+        assert_eq!(result, RespValue::Integer(1));
     }
 }

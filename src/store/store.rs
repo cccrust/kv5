@@ -720,6 +720,209 @@ impl Store {
             _ => 0.0,
         }
     }
+
+    pub fn getbit(&self, key: &str, offset: usize) -> i64 {
+        let value = match self.get(key) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let bytes = value.as_bytes();
+        let byte_idx = offset / 8;
+        let bit_idx = 7 - (offset % 8);
+        if byte_idx >= bytes.len() {
+            return 0;
+        }
+        ((bytes[byte_idx] >> bit_idx) & 1) as i64
+    }
+
+    pub fn setbit(&self, key: &str, offset: usize, value: u8) -> i64 {
+        let old_value = self.get(key).unwrap_or_default();
+        let old_was_empty = old_value.is_empty();
+        let mut bytes = old_value.into_bytes();
+
+        let byte_idx = offset / 8;
+        let bit_idx = 7 - (offset % 8);
+
+        while bytes.len() <= byte_idx {
+            bytes.push(0);
+        }
+
+        let old_bit = (bytes[byte_idx] >> bit_idx) & 1;
+
+        if value != 0 {
+            bytes[byte_idx] |= 1 << bit_idx;
+        } else {
+            bytes[byte_idx] &= !(1 << bit_idx);
+        }
+
+        let new_value = String::from_utf8(bytes).unwrap_or_default();
+        if new_value.is_empty() || old_was_empty {
+            self.data.insert(
+                key.to_string(),
+                Entry::new(Value::String(new_value.clone())),
+            );
+        } else {
+            self.set(key.to_string(), new_value);
+        }
+
+        self.increment_key_version(key);
+        old_bit as i64
+    }
+
+    pub fn bitcount(&self, key: &str, start: Option<i64>, end: Option<i64>) -> i64 {
+        let value = match self.get(key) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let bytes = value.into_bytes();
+
+        let (start_byte, end_byte) = match (start, end) {
+            (Some(s), Some(e)) => {
+                let s = if s < 0 {
+                    (bytes.len() as i64 + s).max(0) as usize
+                } else {
+                    s as usize
+                };
+                let e = if e < 0 {
+                    (bytes.len() as i64 + e).max(0) as usize
+                } else {
+                    e as usize
+                };
+                (s.min(bytes.len()), e.min(bytes.len().saturating_sub(1)))
+            }
+            _ => (0, bytes.len().saturating_sub(1)),
+        };
+
+        if start_byte > end_byte {
+            return 0;
+        }
+
+        let mut count = 0i64;
+        #[allow(clippy::needless_range_loop)]
+        for i in start_byte..=end_byte {
+            count += bytes[i].count_ones() as i64;
+        }
+        count
+    }
+
+    pub fn bitop(&self, op: &str, destkey: &str, keys: &[&str]) -> i64 {
+        if keys.is_empty() {
+            self.set(destkey.to_string(), String::new());
+            return 0;
+        }
+
+        let mut result_bytes: Vec<u8> = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            let value = self.get(key).unwrap_or_default();
+            let bytes = value.into_bytes();
+
+            if i == 0 {
+                result_bytes = bytes;
+            } else {
+                match op.to_uppercase().as_str() {
+                    "AND" => {
+                        for (j, &b) in bytes.iter().enumerate() {
+                            if j < result_bytes.len() {
+                                result_bytes[j] &= b;
+                            }
+                        }
+                    }
+                    "OR" => {
+                        for (j, &b) in bytes.iter().enumerate() {
+                            if j < result_bytes.len() {
+                                result_bytes[j] |= b;
+                            } else {
+                                result_bytes.push(b);
+                            }
+                        }
+                    }
+                    "XOR" => {
+                        for (j, &b) in bytes.iter().enumerate() {
+                            if j < result_bytes.len() {
+                                result_bytes[j] ^= b;
+                            } else {
+                                result_bytes.push(b);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if op.to_uppercase() == "NOT" && !keys.is_empty() {
+            result_bytes = self.get(keys[0]).unwrap_or_default().into_bytes();
+            for byte in &mut result_bytes {
+                *byte = !*byte;
+            }
+        }
+
+        let result_len = result_bytes.len() as i64;
+        self.set(
+            destkey.to_string(),
+            String::from_utf8(result_bytes).unwrap_or_default(),
+        );
+        result_len
+    }
+
+    pub fn bitpos(&self, key: &str, bit: u8, start: Option<i64>, end: Option<i64>) -> i64 {
+        let value = match self.get(key) {
+            Some(v) => v,
+            None => {
+                if bit == 0 {
+                    return 0;
+                }
+                return -1;
+            }
+        };
+        let bytes = value.into_bytes();
+
+        if bytes.is_empty() {
+            return if bit == 0 { 0 } else { -1 };
+        }
+
+        let start_byte = start
+            .map(|s| {
+                if s < 0 {
+                    (bytes.len() as i64 + s).max(0) as usize
+                } else {
+                    s as usize
+                }
+            })
+            .unwrap_or(0);
+
+        let end_byte = end
+            .map(|e| {
+                if e < 0 {
+                    (bytes.len() as i64 + e).max(0) as usize
+                } else {
+                    e as usize
+                }
+            })
+            .unwrap_or(bytes.len().saturating_sub(1));
+
+        let start_byte = start_byte.min(bytes.len());
+        let end_byte = end_byte.min(bytes.len().saturating_sub(1));
+
+        if start_byte > end_byte {
+            return -1;
+        }
+
+        #[allow(clippy::needless_range_loop)]
+        for i in start_byte..=end_byte {
+            let byte = bytes[i];
+            for j in 0..8 {
+                let bit_pos = 7 - j;
+                let actual_bit = (byte >> bit_pos) & 1;
+                if actual_bit == bit {
+                    return (i * 8 + j) as i64;
+                }
+            }
+        }
+
+        -1
+    }
 }
 
 #[cfg(test)]
@@ -968,5 +1171,14 @@ mod tests {
         assert_eq!(s.type_of("none"), "none");
         s.zadd("myset", 1.0, "a");
         assert_eq!(s.type_of("myset"), "zset");
+    }
+
+    #[test]
+    fn test_bit_setget() {
+        let s = new_store();
+        let old = s.setbit("mykey", 7, 1);
+        assert_eq!(old, 0, "first setbit should return 0");
+        assert_eq!(s.getbit("mykey", 7), 1, "bit 7 should be 1 after set");
+        assert_eq!(s.getbit("mykey", 0), 0, "bit 0 should still be 0");
     }
 }
